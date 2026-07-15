@@ -35,9 +35,13 @@ export const AiProviderId = {
 
 export type AiProviderIdValue = (typeof AiProviderId)[keyof typeof AiProviderId];
 
-/** Tight per-step output caps — saves completion + reasoning tokens on gpt-5-nano. */
+/**
+ * Per-step Responses API output caps.
+ * GPT-5 reasoning tokens count against max_output_tokens — budgets must leave
+ * room for reasoning + JSON, not just the final object.
+ */
 export const AiOutputTokenBudget = {
-  classify: 256,
-  vendor: 192,
-  extract: 1_800,
+  classify: 1_024,
+  vendor: 768,
+  extract: 8_000,
 } as const;
