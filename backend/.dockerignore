@@ -1,0 +1,16 @@
+# Dependencies & build
+node_modules
+dist
+coverage
+uploads
+tmp
+.env
+.env.*
+!.env.example
+*.log
+.git
+.gitignore
+README.md
+src/**/*.test.ts
+Dockerfile*
+.dockerignore

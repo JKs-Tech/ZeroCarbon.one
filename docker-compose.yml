@@ -1,0 +1,148 @@
+# =============================================================================
+# ZeroCarbon.one — Production Docker Compose
+# Start: docker compose up
+# Stop:  docker compose down
+# =============================================================================
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: zerocarbon-mongodb
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - zerocarbon
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: zerocarbon-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - zerocarbon
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: zerocarbon-backend
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - ./backend/.env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      MONGODB_URI: mongodb://mongodb:27017/zerocarbon
+      MONGODB_DB_NAME: zerocarbon
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_PATH: /app/uploads
+      TEMP_DIRECTORY: /app/tmp/ocr
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+      TRUST_PROXY: "true"
+    volumes:
+      - uploads_data:/app/uploads
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    networks:
+      - zerocarbon
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # BullMQ consumer (same image as API). Required for OCR → AI → validation pipeline.
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: zerocarbon-worker
+    restart: unless-stopped
+    stop_grace_period: 60s
+    command: ["node", "dist/workers/index.js"]
+    env_file:
+      - ./backend/.env
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongodb:27017/zerocarbon
+      MONGODB_DB_NAME: zerocarbon
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_PATH: /app/uploads
+      TEMP_DIRECTORY: /app/tmp/ocr
+    volumes:
+      - uploads_data:/app/uploads
+    networks:
+      - zerocarbon
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"const n=require('net');const s=n.connect(6379,'redis',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),4000);\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+    container_name: zerocarbon-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    networks:
+      - zerocarbon
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongodb_data:
+  redis_data:
+  uploads_data:
+
+networks:
+  zerocarbon:
+    driver: bridge
+    name: zerocarbon
