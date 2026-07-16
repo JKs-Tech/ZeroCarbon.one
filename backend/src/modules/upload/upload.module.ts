@@ -3,6 +3,7 @@
  */
 export { UploadService } from './upload.service';
 export { UploadController } from './upload.controller';
+export { PdfSplitService } from './pdf-split.service';
 export { createUploadRouter } from './upload.routes';
 export { FileValidator } from './validators/file.validator';
 export { UploadField } from './dto/upload-file.dto';

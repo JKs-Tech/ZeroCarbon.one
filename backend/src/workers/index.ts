@@ -5,6 +5,7 @@ import {
   type AppContainer,
 } from '../container';
 import { DocumentProcessingWorker } from '../modules/queue';
+import { PdfSplitService } from '../modules/upload';
 
 /**
  * Worker process entrypoint (Architecture: API ≠ Worker).
@@ -40,6 +41,14 @@ async function bootstrapWorker(): Promise<void> {
 
   await connectInfrastructure(container);
 
+  const pdfSplitService = new PdfSplitService(
+    container.storageService,
+    container.documentsRepository,
+    container.queue,
+    workerLogger,
+    config,
+  );
+
   const processingWorker = new DocumentProcessingWorker(
     config,
     logger.child('DocumentProcessingWorker'),
@@ -48,6 +57,7 @@ async function bootstrapWorker(): Promise<void> {
     container.ocrService,
     container.aiService,
     container.validationService,
+    pdfSplitService,
   );
 
   processingWorker.start();

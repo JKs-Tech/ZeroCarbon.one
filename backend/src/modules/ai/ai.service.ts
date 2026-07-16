@@ -1,11 +1,15 @@
 import type { ConfigService } from '../config';
 import type { LoggerService } from '../logger';
+import {
+  OCR_THIN_TEXT_CHARS,
+  OCR_VISION_CONFIDENCE_THRESHOLD,
+} from './ai.constants';
 import { AiPermanentError, AiTransientError } from './ai.errors';
 import { assertNonEmptyOcr } from './ai.json';
 import type { ClassificationResult } from './interfaces/classification-result.interface';
 import type { ExtractionResult } from './interfaces/extraction-result.interface';
 import type { VendorResult } from './interfaces/vendor-result.interface';
-import type { AiProvider } from './providers/ai-provider.interface';
+import type { AiExtractionImage, AiProvider } from './providers/ai-provider.interface';
 import { AiProviderFactory } from './providers/ai-provider.factory';
 import { ClassificationTask } from './tasks/classification.task';
 import { FieldExtractionTask } from './tasks/field-extraction.task';
@@ -14,6 +18,12 @@ import { VendorDetectionTask } from './tasks/vendor-detection.task';
 export interface AiPipelineContext {
   documentId: string;
   workerId?: number;
+  /** OCR method / quality hints for vision routing. */
+  ocrMethod?: 'DIRECT_TEXT' | 'TESSERACT';
+  ocrConfidence?: number;
+  mimeType?: string;
+  /** Page image for multimodal extraction (PNG/JPEG bills or split PDF pages). */
+  image?: AiExtractionImage;
 }
 
 export interface AiPipelineResult {
@@ -23,6 +33,7 @@ export interface AiPipelineResult {
   totalDurationMs: number;
   provider: string;
   model: string;
+  usedVision: boolean;
 }
 
 /**
@@ -35,6 +46,7 @@ export class AiService {
   private readonly vendorTask: VendorDetectionTask;
   private readonly extractionTask: FieldExtractionTask;
   private readonly maxRetries: number;
+  private readonly visionEnabled: boolean;
 
   public constructor(
     config: ConfigService,
@@ -42,6 +54,7 @@ export class AiService {
   ) {
     this.provider = AiProviderFactory.create(config, logger);
     this.maxRetries = config.ai.maxRetries;
+    this.visionEnabled = config.ai.visionEnabled;
     this.classificationTask = new ClassificationTask(this.provider, logger.child('ClassificationAgent'));
     this.vendorTask = new VendorDetectionTask(this.provider, logger.child('VendorAgent'));
     this.extractionTask = new FieldExtractionTask(this.provider, logger.child('ExtractionAgent'));
@@ -50,12 +63,13 @@ export class AiService {
       provider: this.provider.name,
       model: this.provider.model,
       maxRetries: this.maxRetries,
+      visionEnabled: this.visionEnabled,
     });
   }
 
   /**
    * Runs Classification → Vendor → Extraction on OCR text.
-   * Stops after structured extraction (no validation).
+   * Optionally attaches a page image for extraction on scanned/image bills.
    */
   public async processOcrText(
     ocrText: string,
@@ -66,12 +80,17 @@ export class AiService {
 
     assertNonEmptyOcr(ocrText);
 
+    const extractionImage = this.resolveExtractionImage(ocrText, context);
+
     this.logger.info('AI pipeline started', {
       documentId: context.documentId,
       workerId,
       provider: this.provider.name,
       model: this.provider.model,
       ocrChars: ocrText.length,
+      ocrMethod: context.ocrMethod,
+      ocrConfidence: context.ocrConfidence,
+      vision: Boolean(extractionImage),
     });
 
     const agentContext = { documentId: context.documentId, workerId };
@@ -97,6 +116,7 @@ export class AiService {
           classification.documentType,
           vendor.vendor,
           agentContext,
+          extractionImage,
         ),
     );
 
@@ -110,6 +130,8 @@ export class AiService {
       documentType: classification.documentType,
       vendor: vendor.vendor,
       totalDurationMs,
+      usedVision: Boolean(extractionImage),
+      fieldCount: Object.keys(extraction.fields).length,
       promptTokens:
         (classification.promptTokens ?? 0) +
         (vendor.promptTokens ?? 0) +
@@ -127,7 +149,33 @@ export class AiService {
       totalDurationMs,
       provider: this.provider.name,
       model: this.provider.model,
+      usedVision: Boolean(extractionImage),
     };
+  }
+
+  private resolveExtractionImage(
+    ocrText: string,
+    context: AiPipelineContext,
+  ): AiExtractionImage | undefined {
+    if (!this.visionEnabled || !context.image?.buffer?.length) {
+      return undefined;
+    }
+
+    const mime = (context.mimeType ?? context.image.mimeType).toLowerCase();
+    const isImageMime = mime === 'image/png' || mime === 'image/jpeg';
+    const fromTesseract = context.ocrMethod === 'TESSERACT';
+    const weakOcr =
+      context.ocrConfidence === undefined ||
+      context.ocrConfidence < OCR_VISION_CONFIDENCE_THRESHOLD ||
+      ocrText.trim().length < OCR_THIN_TEXT_CHARS;
+
+    // Image uploads, split PDF page PNGs, and scanned PDFs (Tesseract) get vision
+    // so the model can recover labels OCR missed. Born-digital DIRECT_TEXT skips vision.
+    if (isImageMime || fromTesseract || weakOcr) {
+      return context.image;
+    }
+
+    return undefined;
   }
 
   private async withRetries<T>(

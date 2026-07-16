@@ -12,6 +12,17 @@ export interface ProcessDocumentJobPayload {
 }
 
 /**
+ * SPLIT_UPLOAD job payload — splits a multi-page PDF parent into page documents.
+ */
+export interface SplitUploadJobPayload {
+  parentUploadId: string;
+  userId: string;
+  uploadedAt: string;
+}
+
+export type DocumentProcessingJobPayload = ProcessDocumentJobPayload | SplitUploadJobPayload;
+
+/**
  * Options when enqueueing a process-document job.
  */
 export interface EnqueueProcessDocumentOptions {

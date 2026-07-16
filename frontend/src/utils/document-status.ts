@@ -4,10 +4,13 @@ const TERMINAL = new Set<string>([
   DocumentProcessingStatus.WAITING_FOR_REVIEW,
   DocumentProcessingStatus.APPROVED,
   DocumentProcessingStatus.FAILED,
+  DocumentProcessingStatus.SPLIT_COMPLETE,
 ]);
 
 const PIPELINE_ORDER: string[] = [
   DocumentProcessingStatus.UPLOADED,
+  DocumentProcessingStatus.SPLITTING,
+  DocumentProcessingStatus.SPLIT_COMPLETE,
   DocumentProcessingStatus.QUEUED,
   DocumentProcessingStatus.PROCESSING,
   DocumentProcessingStatus.OCR_PROCESSING,
@@ -22,6 +25,8 @@ const PIPELINE_ORDER: string[] = [
 
 const STATUS_LABELS: Record<string, string> = {
   [DocumentProcessingStatus.UPLOADED]: 'Uploaded',
+  [DocumentProcessingStatus.SPLITTING]: 'Splitting pages',
+  [DocumentProcessingStatus.SPLIT_COMPLETE]: 'Split complete',
   [DocumentProcessingStatus.QUEUED]: 'Queued',
   [DocumentProcessingStatus.PROCESSING]: 'Processing',
   [DocumentProcessingStatus.OCR_PROCESSING]: 'OCR processing',
@@ -60,6 +65,9 @@ export function isTerminalStatus(status: string): boolean {
 }
 
 export function isProcessingStatus(status: string): boolean {
+  if (status === DocumentProcessingStatus.SPLIT_COMPLETE) {
+    return false;
+  }
   return !isTerminalStatus(status);
 }
 

@@ -22,7 +22,7 @@ import {
 } from '../prompts/extraction.prompt';
 import { buildVendorSystemPrompt, buildVendorUserPrompt } from '../prompts/vendor.prompt';
 import { packOcrForAgent } from '../utils/ocr-pack';
-import type { AiChatRequest, AiChatResponse, AiProvider } from './ai-provider.interface';
+import type { AiChatRequest, AiChatResponse, AiExtractionImage, AiProvider } from './ai-provider.interface';
 
 /**
  * Official OpenAI GPT-5 Nano adapter (Responses API).
@@ -122,12 +122,15 @@ export class OpenAiProvider implements AiProvider {
     ocrText: string,
     documentType: DocumentCategoryValue,
     vendor: string,
+    image?: AiExtractionImage,
   ): Promise<ExtractionResult> {
     const packed = packOcrForAgent(ocrText, 'extract');
+    const useVision = Boolean(image?.buffer?.length);
     const response = await this.complete({
       systemPrompt: buildExtractionSystemPrompt(documentType),
-      userPrompt: buildExtractionUserPrompt(packed, documentType, vendor),
-      maxOutputTokens: Math.min(this.maxOutputTokens, AiOutputTokenBudget.extract),
+      userPrompt: buildExtractionUserPrompt(packed, documentType, vendor, useVision),
+      maxOutputTokens: Math.max(this.maxOutputTokens, AiOutputTokenBudget.extract),
+      image: useVision ? image : undefined,
     });
 
     const parsed = parseModelJson(response.content);
@@ -160,15 +163,33 @@ export class OpenAiProvider implements AiProvider {
     };
   }
 
-  private async complete(request: AiChatRequest): Promise<AiChatResponse> {
+  private async complete(
+    request: AiChatRequest & { image?: AiExtractionImage },
+  ): Promise<AiChatResponse> {
     const startedAt = Date.now();
     const maxOutputTokens = request.maxOutputTokens ?? this.maxOutputTokens;
 
     try {
+      const input = request.image
+        ? [
+            {
+              role: 'user' as const,
+              content: [
+                { type: 'input_text' as const, text: request.userPrompt },
+                {
+                  type: 'input_image' as const,
+                  detail: 'high' as const,
+                  image_url: `data:${request.image.mimeType};base64,${request.image.buffer.toString('base64')}`,
+                },
+              ],
+            },
+          ]
+        : request.userPrompt;
+
       const response = await this.client.responses.create({
         model: this.model,
         instructions: request.systemPrompt,
-        input: request.userPrompt,
+        input,
         reasoning: {
           effort: this.reasoningEffort,
         },
@@ -194,6 +215,7 @@ export class OpenAiProvider implements AiProvider {
         inputTokens: response.usage?.input_tokens,
         outputTokens: response.usage?.output_tokens,
         maxOutputTokens,
+        vision: Boolean(request.image),
         durationMs: Date.now() - startedAt,
       });
 

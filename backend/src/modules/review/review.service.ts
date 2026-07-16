@@ -49,6 +49,9 @@ export interface ReviewPayload {
     mimeType: string;
     fileSize: number;
     processingStatus: string;
+    parentUploadId?: string;
+    pageNumber?: number;
+    totalPages?: number;
     uploadTimestamp: Date;
     createdAt: Date;
     updatedAt: Date;
@@ -59,6 +62,7 @@ export interface ReviewPayload {
   vendor: PublicDocument['vendor'];
   validation: PublicDocument['validation'];
   editableFields: Record<string, string | number | null>;
+  originalExtractionFields?: Record<string, string | number | null>;
   approvalStatus: 'WAITING_FOR_REVIEW' | 'APPROVED' | 'NOT_READY';
   approval?: PublicDocument['approval'];
   approvedFields?: PublicDocument['approvedFields'];
@@ -311,6 +315,9 @@ export class ReviewService {
         mimeType: publicDoc.mimeType,
         fileSize: publicDoc.fileSize,
         processingStatus: publicDoc.processingStatus,
+        parentUploadId: publicDoc.parentUploadId,
+        pageNumber: publicDoc.pageNumber,
+        totalPages: publicDoc.totalPages,
         uploadTimestamp: publicDoc.uploadTimestamp,
         createdAt: publicDoc.createdAt,
         updatedAt: publicDoc.updatedAt,
@@ -321,6 +328,9 @@ export class ReviewService {
       vendor: publicDoc.vendor,
       validation: publicDoc.validation,
       editableFields,
+      originalExtractionFields: document.extraction?.originalFields
+        ? { ...document.extraction.originalFields }
+        : undefined,
       approvalStatus,
       approval: publicDoc.approval,
       approvedFields: publicDoc.approvedFields,

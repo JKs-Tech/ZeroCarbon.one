@@ -113,6 +113,13 @@ export const documentsApi = {
     return data.data.document;
   },
 
+  async listPages(parentId: string): Promise<DocumentSummary[]> {
+    const { data } = await apiClient.get<ApiSuccess<{ documents: DocumentSummary[] }>>(
+      `/documents/${parentId}/pages`,
+    );
+    return data.data.documents;
+  },
+
   async reprocess(id: string): Promise<DocumentSummary> {
     const { data } = await apiClient.post<ApiSuccess<{ document: DocumentSummary }>>(
       `/documents/${id}/reprocess`,

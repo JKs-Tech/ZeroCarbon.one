@@ -41,7 +41,13 @@ export type AiProviderIdValue = (typeof AiProviderId)[keyof typeof AiProviderId]
  * room for reasoning + JSON, not just the final object.
  */
 export const AiOutputTokenBudget = {
-  classify: 1_024,
-  vendor: 768,
-  extract: 8_000,
+  classify: 1_536,
+  vendor: 1_024,
+  extract: 8_192,
 } as const;
+
+/** Tesseract confidence (0–100) below which vision extraction is preferred. */
+export const OCR_VISION_CONFIDENCE_THRESHOLD = 65;
+
+/** Minimum OCR char length before treating text as too thin for text-only extract. */
+export const OCR_THIN_TEXT_CHARS = 120;

@@ -7,9 +7,14 @@ import type { StorageService } from '../storage';
 import type { OcrService } from '../ocr';
 import { AiPermanentError, type AiService } from '../ai';
 import type { ValidationService } from '../validation';
-import { QueueName } from './queue.constants';
+import type { PdfSplitService } from '../upload/pdf-split.service';
+import { JobName, QueueName } from './queue.constants';
 import { buildRedisConnection } from './redis-connection';
-import type { ProcessDocumentJobPayload } from './queue.types';
+import type {
+  DocumentProcessingJobPayload,
+  ProcessDocumentJobPayload,
+  SplitUploadJobPayload,
+} from './queue.types';
 
 /**
  * Responsibility: Consume PROCESS_DOCUMENT jobs from DocumentProcessingQueue.
@@ -24,7 +29,7 @@ import type { ProcessDocumentJobPayload } from './queue.types';
  * https://docs.bullmq.io/guide/workers/stalled-jobs
  */
 export class DocumentProcessingWorker {
-  private worker: Worker<ProcessDocumentJobPayload> | undefined;
+  private worker: Worker<DocumentProcessingJobPayload> | undefined;
   private running = false;
 
   public constructor(
@@ -35,6 +40,7 @@ export class DocumentProcessingWorker {
     private readonly ocrService: OcrService,
     private readonly aiService: AiService,
     private readonly validationService: ValidationService,
+    private readonly pdfSplitService: PdfSplitService,
   ) {}
 
   /**
@@ -48,7 +54,7 @@ export class DocumentProcessingWorker {
     const { concurrency, lockDurationMs, stalledIntervalMs, maxStalledCount } =
       this.config.queue;
 
-    this.worker = new Worker<ProcessDocumentJobPayload>(
+    this.worker = new Worker<DocumentProcessingJobPayload>(
       QueueName.DOCUMENT_PROCESSING,
       async (job) => this.processJob(job),
       {
@@ -75,7 +81,9 @@ export class DocumentProcessingWorker {
     this.worker.on('completed', (job) => {
       this.logger.info('Job completed', {
         jobId: job.id,
-        documentId: job.data.documentId,
+        jobName: job.name,
+        documentId: 'documentId' in job.data ? job.data.documentId : undefined,
+        parentUploadId: 'parentUploadId' in job.data ? job.data.parentUploadId : undefined,
         userId: job.data.userId,
         attempt: job.attemptsMade,
       });
@@ -124,7 +132,64 @@ export class DocumentProcessingWorker {
     this.logger.info('DocumentProcessingWorker stopped');
   }
 
-  private async processJob(job: Job<ProcessDocumentJobPayload>): Promise<void> {
+  private async processJob(job: Job<DocumentProcessingJobPayload>): Promise<void> {
+    if (job.name === JobName.SPLIT_UPLOAD) {
+      await this.processSplitJob(job as Job<SplitUploadJobPayload>);
+      return;
+    }
+
+    await this.processDocumentJob(job as Job<ProcessDocumentJobPayload>);
+  }
+
+  private async processSplitJob(job: Job<SplitUploadJobPayload>): Promise<void> {
+    const startedAt = Date.now();
+    const { parentUploadId, userId } = job.data;
+    const workerId = process.pid;
+
+    this.logger.info('Split job started', {
+      jobId: job.id,
+      parentUploadId,
+      userId,
+      attempt: job.attemptsMade + 1,
+      workerId,
+    });
+
+    const parent = await this.documentsRepository.findById(parentUploadId);
+
+    if (!parent) {
+      throw new UnrecoverableError(`Parent upload not found: ${parentUploadId}`);
+    }
+
+    if (parent.processingStatus === DocumentProcessingStatus.SPLIT_COMPLETE) {
+      this.logger.info('Split job skipped — parent already split', {
+        jobId: job.id,
+        parentUploadId,
+      });
+      return;
+    }
+
+    await this.documentsRepository.updateStatus(parentUploadId, {
+      processingStatus: DocumentProcessingStatus.SPLITTING,
+      jobId: job.id,
+      failureReason: null,
+    });
+    await this.heartbeat(job, 10);
+
+    const result = await this.pdfSplitService.splitAndEnqueue(parentUploadId);
+    await this.heartbeat(job, 100);
+
+    this.logger.info('Split job finished', {
+      jobId: job.id,
+      parentUploadId,
+      userId,
+      created: result.created,
+      failed: result.failed,
+      executionTimeMs: Date.now() - startedAt,
+      workerId,
+    });
+  }
+
+  private async processDocumentJob(job: Job<ProcessDocumentJobPayload>): Promise<void> {
     const startedAt = Date.now();
     const { documentId, userId } = job.data;
     const workerId = process.pid;
@@ -142,6 +207,14 @@ export class DocumentProcessingWorker {
 
     if (!document) {
       throw new UnrecoverableError(`Document not found: ${documentId}`);
+    }
+
+    if (document.isUploadContainer) {
+      this.logger.info('Job skipped — upload container documents are not processed', {
+        jobId: job.id,
+        documentId,
+      });
+      return;
     }
 
     // Idempotent: terminal / review-ready docs must not be re-processed after a stall recovery.
@@ -219,9 +292,21 @@ export class DocumentProcessingWorker {
 
     let aiResult;
     try {
+      const imageFromOcr = ocrResult.pageImage;
+      const imageMime =
+        document.mimeType === 'image/png' || document.mimeType === 'image/jpeg'
+          ? (document.mimeType as 'image/png' | 'image/jpeg')
+          : undefined;
+
       aiResult = await this.aiService.processOcrText(ocrResult.text, {
         documentId,
         workerId,
+        ocrMethod: ocrResult.method,
+        ocrConfidence: ocrResult.confidence,
+        mimeType: document.mimeType,
+        image:
+          imageFromOcr ??
+          (imageMime ? { mimeType: imageMime, buffer: fileBuffer } : undefined),
       });
     } catch (error) {
       if (error instanceof AiPermanentError) {
@@ -354,7 +439,7 @@ export class DocumentProcessingWorker {
   /**
    * Reports progress so BullMQ stays aware the worker is alive during long steps.
    */
-  private async heartbeat(job: Job<ProcessDocumentJobPayload>, progress: number): Promise<void> {
+  private async heartbeat(job: Job<DocumentProcessingJobPayload>, progress: number): Promise<void> {
     try {
       await job.updateProgress(progress);
     } catch {
@@ -365,7 +450,7 @@ export class DocumentProcessingWorker {
   }
 
   private async handleJobFailed(
-    job: Job<ProcessDocumentJobPayload> | undefined,
+    job: Job<DocumentProcessingJobPayload> | undefined,
     error: Error,
   ): Promise<void> {
     const maxAttempts = job?.opts.attempts ?? this.config.queue.maxAttempts;
@@ -378,7 +463,10 @@ export class DocumentProcessingWorker {
 
     this.logger.error('Job failed', {
       jobId: job?.id,
-      documentId: job?.data.documentId,
+      jobName: job?.name,
+      documentId: job?.data && 'documentId' in job.data ? job.data.documentId : undefined,
+      parentUploadId:
+        job?.data && 'parentUploadId' in job.data ? job.data.parentUploadId : undefined,
       userId: job?.data.userId,
       attempt: attemptsMade,
       maxAttempts,
@@ -389,19 +477,30 @@ export class DocumentProcessingWorker {
       executionTimeMs: job?.processedOn ? Date.now() - job.processedOn : undefined,
     });
 
-    if (!job?.data.documentId || !exhausted) {
+    if (!job?.data || !exhausted) {
+      return;
+    }
+
+    const failedDocumentId =
+      'documentId' in job.data
+        ? job.data.documentId
+        : 'parentUploadId' in job.data
+          ? job.data.parentUploadId
+          : undefined;
+
+    if (!failedDocumentId) {
       return;
     }
 
     try {
-      await this.documentsRepository.updateStatus(job.data.documentId, {
+      await this.documentsRepository.updateStatus(failedDocumentId, {
         processingStatus: DocumentProcessingStatus.FAILED,
         jobId: job.id,
         failureReason: error.message.slice(0, 2000),
       });
     } catch (updateError) {
       this.logger.error('Failed to persist FAILED document status', {
-        documentId: job.data.documentId,
+        documentId: failedDocumentId,
         error: updateError instanceof Error ? updateError.message : 'unknown',
       });
     }

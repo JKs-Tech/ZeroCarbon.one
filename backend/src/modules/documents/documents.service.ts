@@ -64,6 +64,65 @@ export class DocumentsService {
       this.documentsRepository.countGroupsForActor(actor),
     ]);
 
+    const parentIds = records
+      .filter((doc) => doc.isUploadContainer)
+      .map((doc) => doc._id.toString());
+    const childSummaries = await this.documentsRepository.aggregateChildStatusSummaries(parentIds);
+
+    let documents = records.map((doc) => {
+      if (!doc.isUploadContainer) {
+        return this.documentsRepository.toPublic(doc);
+      }
+
+      const aggregate = childSummaries.get(doc._id.toString());
+      return this.documentsRepository.toPublic(doc, {
+        pageDocumentCount: aggregate?.count ?? doc.totalPages ?? 0,
+        childStatusSummary: aggregate?.summary,
+      });
+    });
+
+    if (statusFilter === 'review') {
+      documents = documents.filter((doc) => {
+        if (doc.isUploadContainer) {
+          return (doc.childStatusSummary?.review ?? 0) > 0;
+        }
+        return doc.processingStatus === DocumentProcessingStatus.WAITING_FOR_REVIEW;
+      });
+    } else if (statusFilter === 'approved') {
+      documents = documents.filter((doc) => {
+        if (doc.isUploadContainer) {
+          const count = doc.pageDocumentCount ?? 0;
+          return count > 0 && doc.childStatusSummary?.approved === count;
+        }
+        return doc.processingStatus === DocumentProcessingStatus.APPROVED;
+      });
+    } else if (statusFilter === 'failed') {
+      documents = documents.filter((doc) => {
+        if (doc.isUploadContainer) {
+          return (
+            doc.processingStatus === DocumentProcessingStatus.FAILED ||
+            (doc.childStatusSummary?.failed ?? 0) > 0
+          );
+        }
+        return doc.processingStatus === DocumentProcessingStatus.FAILED;
+      });
+    } else if (statusFilter === 'processing') {
+      documents = documents.filter((doc) => {
+        if (doc.isUploadContainer) {
+          return (
+            doc.processingStatus === DocumentProcessingStatus.SPLITTING ||
+            (doc.childStatusSummary?.processing ?? 0) > 0
+          );
+        }
+        return ![
+          DocumentProcessingStatus.WAITING_FOR_REVIEW,
+          DocumentProcessingStatus.APPROVED,
+          DocumentProcessingStatus.FAILED,
+          DocumentProcessingStatus.SPLIT_COMPLETE,
+        ].includes(doc.processingStatus as typeof DocumentProcessingStatus.WAITING_FOR_REVIEW);
+      });
+    }
+
     this.logger.info('Documents listed', {
       userId: actor.id,
       role: actor.role,
@@ -74,10 +133,36 @@ export class DocumentsService {
     });
 
     return {
-      documents: records.map((doc) => this.documentsRepository.toPublic(doc)),
+      documents,
       counts,
       pagination: buildPaginationMeta(pagination, total),
     };
+  }
+
+  /**
+   * Returns child page documents for a parent upload container.
+   */
+  public async listPageDocuments(
+    parentUploadId: string,
+    actor: AuthenticatedUser,
+  ): Promise<PublicDocument[]> {
+    const parent = await this.documentsRepository.findById(parentUploadId);
+
+    if (!parent) {
+      throw new NotFoundException('Document not found');
+    }
+
+    if (actor.role !== Role.ADMIN && parent.userId.toString() !== actor.id) {
+      throw new ForbiddenException('You can only access your own documents');
+    }
+
+    if (!parent.isUploadContainer) {
+      throw new NotFoundException('Document is not a multi-page upload container');
+    }
+
+    const children = await this.documentsRepository.findChildrenByParentId(parentUploadId);
+
+    return children.map((child) => this.documentsRepository.toPublic(child));
   }
 
   /**

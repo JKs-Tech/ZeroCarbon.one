@@ -26,6 +26,14 @@ export interface AiChatResponse {
 }
 
 /**
+ * Optional page image for multimodal extraction (scanned / image bills).
+ */
+export interface AiExtractionImage {
+  mimeType: 'image/png' | 'image/jpeg';
+  buffer: Buffer;
+}
+
+/**
  * Provider-independent AI capabilities.
  * Business modules and tasks MUST depend only on this interface.
  */
@@ -39,5 +47,6 @@ export interface AiProvider {
     ocrText: string,
     documentType: DocumentCategoryValue,
     vendor: string,
+    image?: AiExtractionImage,
   ): Promise<ExtractionResult>;
 }

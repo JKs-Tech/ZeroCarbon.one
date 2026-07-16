@@ -2,6 +2,10 @@
 
 Upload utility bills → OCR → AI extraction → validation warnings → human review → approved output.
 
+**Multi-page PDFs:** one upload containing multiple scanned bills is automatically split into one document per page. Each page runs through the full pipeline independently (OCR, classification, vendor detection, extraction, validation, review, and approval). The dashboard shows the parent upload with an expandable list of bills.
+
+**Scanned / image bills:** pages are OCR'd at higher DPI (with a confidence retry), then extraction can use both OCR text and the page image (vision) so amounts and labels are recovered even when OCR is noisy. Large bills get a wider AI text budget so mid-page totals are not dropped.
+
 ## What you need
 
 | Tool | Why |
@@ -100,10 +104,11 @@ There is **no seed user**.
 ## Demo flow (2 minutes)
 
 1. Register (first user = admin) → Login  
-2. **Workspace** → upload PDF/PNG/JPG  
+2. **Workspace** → upload PDF/PNG/JPG (multi-page PDFs split into one bill per page)  
 3. Watch status: Queued → OCR → AI → Validating → Waiting for review  
-4. Open **Review & Approve** → edit fields if needed → **Approve**  
-5. **Document Details** → see **Final approved output**
+4. For multi-page uploads, expand the parent card → **Review** each bill individually  
+5. Open **Review & Approve** → edit fields if needed → **Save** or **Approve**  
+6. **Document Details** → see **Final approved output** (original AI extraction preserved separately)
 
 ---
 

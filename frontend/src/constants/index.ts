@@ -7,6 +7,8 @@ export type RoleValue = (typeof Role)[keyof typeof Role];
 
 export const DocumentProcessingStatus = {
   UPLOADED: 'UPLOADED',
+  SPLITTING: 'SPLITTING',
+  SPLIT_COMPLETE: 'SPLIT_COMPLETE',
   QUEUED: 'QUEUED',
   PROCESSING: 'PROCESSING',
   OCR_PROCESSING: 'OCR_PROCESSING',
@@ -30,6 +32,7 @@ export const QUERY_KEYS = {
   documentsList: (page: number, limit: number, status: string) =>
     ['documents', 'list', page, limit, status] as const,
   document: (id: string) => ['documents', id] as const,
+  documentPages: (id: string) => ['documents', id, 'pages'] as const,
   review: (id: string) => ['review', id] as const,
   users: ['users'] as const,
   usersList: (page: number, limit: number) => ['users', 'list', page, limit] as const,

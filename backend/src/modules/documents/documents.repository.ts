@@ -2,6 +2,7 @@ import { Types } from 'mongoose';
 import {
   DocumentModel,
   toPublicDocument,
+  type ChildStatusSummary,
   type DocumentClassificationArtifact,
   type DocumentExtractionArtifact,
   type DocumentOcrArtifact,
@@ -25,6 +26,10 @@ export interface CreateDocumentRecord {
   fileSize: number;
   uploadTimestamp?: Date;
   processingStatus: DocumentProcessingStatusValue;
+  parentUploadId?: string;
+  pageNumber?: number;
+  totalPages?: number;
+  isUploadContainer?: boolean;
 }
 
 export interface UpdateDocumentStatusInput {
@@ -56,11 +61,17 @@ export class DocumentsRepository {
    * Inserts a new document metadata record.
    */
   public async create(data: CreateDocumentRecord): Promise<DocumentRecord> {
-    return DocumentModel.create({
+    const payload: Record<string, unknown> = {
       ...data,
       userId: new Types.ObjectId(data.userId),
       uploadTimestamp: data.uploadTimestamp ?? new Date(),
-    });
+    };
+
+    if (data.parentUploadId) {
+      payload.parentUploadId = new Types.ObjectId(data.parentUploadId);
+    }
+
+    return DocumentModel.create(payload);
   }
 
   /**
@@ -135,13 +146,18 @@ export class DocumentsRepository {
     },
     processingStatus: DocumentProcessingStatusValue,
   ): Promise<DocumentRecord | null> {
+    const extraction = {
+      ...artifacts.extraction,
+      originalFields: { ...artifacts.extraction.fields },
+    };
+
     return DocumentModel.findByIdAndUpdate(
       id,
       {
         $set: {
           classification: artifacts.classification,
           vendor: artifacts.vendor,
-          extraction: artifacts.extraction,
+          extraction,
           processingStatus,
         },
         $unset: { failureReason: 1 },
@@ -276,6 +292,94 @@ export class DocumentsRepository {
   }
 
   /**
+   * Finds child page documents for a parent upload, ordered by page number.
+   */
+  public async findChildrenByParentId(parentUploadId: string): Promise<DocumentRecord[]> {
+    return DocumentModel.find({ parentUploadId: new Types.ObjectId(parentUploadId) })
+      .sort({ pageNumber: 1 })
+      .exec();
+  }
+
+  /**
+   * Aggregates child status counts for parent upload containers.
+   */
+  public async aggregateChildStatusSummaries(
+    parentIds: string[],
+  ): Promise<Map<string, { count: number; summary: ChildStatusSummary }>> {
+    const result = new Map<string, { count: number; summary: ChildStatusSummary }>();
+
+    if (parentIds.length === 0) {
+      return result;
+    }
+
+    const objectIds = parentIds.map((id) => new Types.ObjectId(id));
+    const rows = await DocumentModel.aggregate<{
+      _id: Types.ObjectId;
+      count: number;
+      processing: number;
+      review: number;
+      approved: number;
+      failed: number;
+    }>([
+      { $match: { parentUploadId: { $in: objectIds } } },
+      {
+        $group: {
+          _id: '$parentUploadId',
+          count: { $sum: 1 },
+          processing: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ['$processingStatus', DocumentProcessingStatus.WAITING_FOR_REVIEW] },
+                    { $ne: ['$processingStatus', DocumentProcessingStatus.APPROVED] },
+                    { $ne: ['$processingStatus', DocumentProcessingStatus.FAILED] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          review: {
+            $sum: {
+              $cond: [
+                { $eq: ['$processingStatus', DocumentProcessingStatus.WAITING_FOR_REVIEW] },
+                1,
+                0,
+              ],
+            },
+          },
+          approved: {
+            $sum: {
+              $cond: [{ $eq: ['$processingStatus', DocumentProcessingStatus.APPROVED] }, 1, 0],
+            },
+          },
+          failed: {
+            $sum: {
+              $cond: [{ $eq: ['$processingStatus', DocumentProcessingStatus.FAILED] }, 1, 0],
+            },
+          },
+        },
+      },
+    ]).exec();
+
+    for (const row of rows) {
+      result.set(String(row._id), {
+        count: row.count,
+        summary: {
+          processing: row.processing,
+          review: row.review,
+          approved: row.approved,
+          failed: row.failed,
+        },
+      });
+    }
+
+    return result;
+  }
+
+  /**
    * Lists documents for a user, or all documents for ADMIN.
    */
   public async findForActor(
@@ -283,6 +387,7 @@ export class DocumentsRepository {
     options: { skip: number; limit: number; statusFilter?: DocumentListStatusFilter },
   ): Promise<DocumentRecord[]> {
     const filter = this.buildActorFilter(actor, options.statusFilter);
+    filter.parentUploadId = { $exists: false };
 
     return DocumentModel.find(filter)
       .sort({ createdAt: -1 })
@@ -293,27 +398,79 @@ export class DocumentsRepository {
 
   /**
    * Counts documents visible to the actor (optionally by status group).
+   * Top-level only — excludes child page documents.
    */
   public async countForActor(
     actor: { id: string; role: string },
     statusFilter: DocumentListStatusFilter = 'all',
   ): Promise<number> {
-    return DocumentModel.countDocuments(this.buildActorFilter(actor, statusFilter)).exec();
+    const filter = this.buildActorFilter(actor, statusFilter);
+    filter.parentUploadId = { $exists: false };
+    return DocumentModel.countDocuments(filter).exec();
   }
 
   /**
    * Status-group counts for dashboard chips (scoped by role).
+   * Counts child page documents for pipeline statuses; top-level for all.
    */
   public async countGroupsForActor(actor: { id: string; role: string }): Promise<DocumentStatusCounts> {
+    const userFilter =
+      actor.role === 'ADMIN' ? {} : { userId: new Types.ObjectId(actor.id) };
+
     const [all, processing, review, approved, failed] = await Promise.all([
-      this.countForActor(actor, 'all'),
-      this.countForActor(actor, 'processing'),
-      this.countForActor(actor, 'review'),
-      this.countForActor(actor, 'approved'),
-      this.countForActor(actor, 'failed'),
+      DocumentModel.countDocuments({
+        ...userFilter,
+        parentUploadId: { $exists: false },
+      }).exec(),
+      DocumentModel.countDocuments({
+        ...userFilter,
+        $or: [
+          { parentUploadId: { $exists: true }, processingStatus: { $nin: this.terminalStatuses() } },
+          {
+            parentUploadId: { $exists: false },
+            processingStatus: {
+              $in: [
+                DocumentProcessingStatus.SPLITTING,
+                DocumentProcessingStatus.UPLOADED,
+                DocumentProcessingStatus.QUEUED,
+                DocumentProcessingStatus.PROCESSING,
+                DocumentProcessingStatus.OCR_PROCESSING,
+                DocumentProcessingStatus.OCR_COMPLETED,
+                DocumentProcessingStatus.AI_PROCESSING,
+                DocumentProcessingStatus.AI_COMPLETED,
+                DocumentProcessingStatus.VALIDATING,
+                DocumentProcessingStatus.VALIDATION_COMPLETED,
+              ],
+            },
+          },
+        ],
+      }).exec(),
+      DocumentModel.countDocuments({
+        ...userFilter,
+        parentUploadId: { $exists: true },
+        processingStatus: DocumentProcessingStatus.WAITING_FOR_REVIEW,
+      }).exec(),
+      DocumentModel.countDocuments({
+        ...userFilter,
+        parentUploadId: { $exists: true },
+        processingStatus: DocumentProcessingStatus.APPROVED,
+      }).exec(),
+      DocumentModel.countDocuments({
+        ...userFilter,
+        parentUploadId: { $exists: true },
+        processingStatus: DocumentProcessingStatus.FAILED,
+      }).exec(),
     ]);
 
     return { all, processing, review, approved, failed };
+  }
+
+  private terminalStatuses(): DocumentProcessingStatusValue[] {
+    return [
+      DocumentProcessingStatus.WAITING_FOR_REVIEW,
+      DocumentProcessingStatus.APPROVED,
+      DocumentProcessingStatus.FAILED,
+    ];
   }
 
   private buildActorFilter(
@@ -324,19 +481,68 @@ export class DocumentsRepository {
       actor.role === 'ADMIN' ? {} : { userId: new Types.ObjectId(actor.id) };
 
     if (statusFilter === 'processing') {
-      filter.processingStatus = {
-        $nin: [
-          DocumentProcessingStatus.WAITING_FOR_REVIEW,
-          DocumentProcessingStatus.APPROVED,
-          DocumentProcessingStatus.FAILED,
-        ],
-      };
+      filter.$or = [
+        {
+          parentUploadId: { $exists: true },
+          processingStatus: {
+            $nin: [
+              DocumentProcessingStatus.WAITING_FOR_REVIEW,
+              DocumentProcessingStatus.APPROVED,
+              DocumentProcessingStatus.FAILED,
+            ],
+          },
+        },
+        {
+          parentUploadId: { $exists: false },
+          processingStatus: {
+            $in: [
+              DocumentProcessingStatus.SPLITTING,
+              DocumentProcessingStatus.UPLOADED,
+              DocumentProcessingStatus.QUEUED,
+              DocumentProcessingStatus.PROCESSING,
+              DocumentProcessingStatus.OCR_PROCESSING,
+              DocumentProcessingStatus.OCR_COMPLETED,
+              DocumentProcessingStatus.AI_PROCESSING,
+              DocumentProcessingStatus.AI_COMPLETED,
+              DocumentProcessingStatus.VALIDATING,
+              DocumentProcessingStatus.VALIDATION_COMPLETED,
+            ],
+          },
+        },
+      ];
     } else if (statusFilter === 'review') {
-      filter.processingStatus = DocumentProcessingStatus.WAITING_FOR_REVIEW;
+      filter.$or = [
+        {
+          parentUploadId: { $exists: false },
+          isUploadContainer: { $ne: true },
+          processingStatus: DocumentProcessingStatus.WAITING_FOR_REVIEW,
+        },
+        {
+          isUploadContainer: true,
+          processingStatus: DocumentProcessingStatus.SPLIT_COMPLETE,
+        },
+      ];
     } else if (statusFilter === 'approved') {
-      filter.processingStatus = DocumentProcessingStatus.APPROVED;
+      filter.$or = [
+        {
+          parentUploadId: { $exists: false },
+          isUploadContainer: { $ne: true },
+          processingStatus: DocumentProcessingStatus.APPROVED,
+        },
+        {
+          isUploadContainer: true,
+          processingStatus: DocumentProcessingStatus.SPLIT_COMPLETE,
+        },
+      ];
     } else if (statusFilter === 'failed') {
-      filter.processingStatus = DocumentProcessingStatus.FAILED;
+      filter.$or = [
+        {
+          parentUploadId: { $exists: false },
+          isUploadContainer: { $ne: true },
+          processingStatus: DocumentProcessingStatus.FAILED,
+        },
+        { isUploadContainer: true, processingStatus: DocumentProcessingStatus.FAILED },
+      ];
     }
 
     return filter;
@@ -345,7 +551,10 @@ export class DocumentsRepository {
   /**
    * Maps a document record to the public DTO.
    */
-  public toPublic(doc: DocumentRecord): PublicDocument {
-    return toPublicDocument(doc);
+  public toPublic(
+    doc: DocumentRecord,
+    extras?: { pageDocumentCount?: number; childStatusSummary?: ChildStatusSummary },
+  ): PublicDocument {
+    return toPublicDocument(doc, extras);
   }
 }

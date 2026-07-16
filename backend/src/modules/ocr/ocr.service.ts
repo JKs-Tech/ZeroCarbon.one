@@ -161,9 +161,23 @@ export class OcrService {
       );
       workDir = materialized.workDir;
 
-      const pages = await this.tesseract.recognizePages(materialized.imagePaths);
-      const text = mergePageTexts(pages.map((page) => page.text));
-      const confidence = this.tesseract.averageConfidence(pages);
+      let pages = await this.tesseract.recognizePages(materialized.imagePaths);
+      let text = mergePageTexts(pages.map((page) => page.text));
+      let confidence = this.tesseract.averageConfidence(pages);
+
+      // Dense scanned bills often need a sharper raster — for PNG uploads we already
+      // have the image; for PDF children this path is used after split at configured DPI.
+      if (
+        confidence !== undefined &&
+        confidence < this.config.ocr.confidenceRetryThreshold &&
+        text.trim().length < this.config.ocr.minTextLength * 3
+      ) {
+        this.logger.info('OCR low confidence on image — keeping best available text', {
+          documentId: input.documentId,
+          confidence,
+          threshold: this.config.ocr.confidenceRetryThreshold,
+        });
+      }
 
       this.logger.info('OCR method', {
         documentId: input.documentId,
@@ -178,6 +192,10 @@ export class OcrService {
         confidence,
         pageCount: pages.length,
         fallbackTriggered: false,
+        pageImage: {
+          mimeType: input.mimeType === AllowedUploadMime.PNG ? 'image/png' : 'image/jpeg',
+          buffer: input.fileBuffer,
+        },
       };
     } finally {
       if (workDir) {
@@ -192,14 +210,54 @@ export class OcrService {
     priorQualityScore?: number,
   ): Promise<Omit<OcrExtractResult, 'durationMs'>> {
     let workDir: string | undefined;
+    let retryDir: string | undefined;
 
     try {
       const converted = await this.imageConverter.convertPdfToImages(pdfBuffer);
       workDir = converted.workDir;
 
-      const pages = await this.tesseract.recognizePages(converted.imagePaths);
-      const text = mergePageTexts(pages.map((page) => page.text));
-      const confidence = this.tesseract.averageConfidence(pages);
+      let pages = await this.tesseract.recognizePages(converted.imagePaths);
+      let text = mergePageTexts(pages.map((page) => page.text));
+      let confidence = this.tesseract.averageConfidence(pages);
+      let winningImagePaths = converted.imagePaths;
+
+      if (
+        confidence !== undefined &&
+        confidence < this.config.ocr.confidenceRetryThreshold
+      ) {
+        this.logger.info('OCR confidence retry at higher DPI', {
+          documentId,
+          confidence,
+          threshold: this.config.ocr.confidenceRetryThreshold,
+          retryDpi: this.config.ocr.retryRasterDpi,
+        });
+
+        const retry = await this.imageConverter.convertPdfToImages(pdfBuffer, {
+          dpi: this.config.ocr.retryRasterDpi,
+        });
+        retryDir = retry.workDir;
+        const retryPages = await this.tesseract.recognizePages(retry.imagePaths);
+        const retryText = mergePageTexts(retryPages.map((page) => page.text));
+        const retryConfidence = this.tesseract.averageConfidence(retryPages);
+
+        if (
+          retryText.trim().length > text.trim().length ||
+          (retryConfidence ?? 0) > (confidence ?? 0)
+        ) {
+          pages = retryPages;
+          text = retryText;
+          confidence = retryConfidence;
+          winningImagePaths = retry.imagePaths;
+        }
+      }
+
+      let pageImage: { mimeType: 'image/png'; buffer: Buffer } | undefined;
+      if (winningImagePaths[0]) {
+        pageImage = {
+          mimeType: 'image/png',
+          buffer: await this.imageConverter.readImage(winningImagePaths[0]),
+        };
+      }
 
       this.logger.info('OCR method', {
         documentId,
@@ -207,6 +265,7 @@ export class OcrService {
         pageCount: pages.length,
         confidence,
         fallbackTriggered: true,
+        hasPageImage: Boolean(pageImage),
       });
 
       return {
@@ -216,10 +275,14 @@ export class OcrService {
         pageCount: pages.length,
         qualityScore: priorQualityScore,
         fallbackTriggered: true,
+        pageImage,
       };
     } finally {
       if (workDir) {
         await this.imageConverter.cleanup(workDir);
+      }
+      if (retryDir) {
+        await this.imageConverter.cleanup(retryDir);
       }
     }
   }

@@ -1,7 +1,7 @@
 import type { LoggerService } from '../../logger';
 import type { DocumentCategoryValue } from '../ai.constants';
 import type { ExtractionResult } from '../interfaces/extraction-result.interface';
-import type { AiProvider } from '../providers/ai-provider.interface';
+import type { AiExtractionImage, AiProvider } from '../providers/ai-provider.interface';
 
 /**
  * Extraction Agent — independent task; unaware of other agents.
@@ -18,6 +18,7 @@ export class FieldExtractionTask {
     documentType: DocumentCategoryValue,
     vendor: string,
     context: { documentId: string; workerId: number },
+    image?: AiExtractionImage,
   ): Promise<ExtractionResult> {
     this.logger.info('Extraction Started', {
       documentId: context.documentId,
@@ -26,10 +27,16 @@ export class FieldExtractionTask {
       vendor,
       model: this.provider.model,
       provider: this.provider.name,
+      vision: Boolean(image),
     });
 
     const startedAt = Date.now();
-    const result = await this.provider.extractFields(ocrText, documentType, vendor);
+    const result = await this.provider.extractFields(
+      ocrText,
+      documentType,
+      vendor,
+      image,
+    );
 
     this.logger.info('Extraction Completed', {
       documentId: context.documentId,
@@ -43,6 +50,7 @@ export class FieldExtractionTask {
       promptTokens: result.promptTokens,
       completionTokens: result.completionTokens,
       wallMs: Date.now() - startedAt,
+      vision: Boolean(image),
     });
 
     return result;

@@ -56,6 +56,8 @@ export interface DocumentExtractionArtifact {
   documentType: string;
   vendor: string;
   fields: Record<string, string | number | null>;
+  /** Immutable AI snapshot at extraction time — never updated on human edit. */
+  originalFields?: Record<string, string | number | null>;
   confidenceScore: number;
   provider: string;
   model: string;
@@ -101,6 +103,13 @@ export interface DocumentApprovalArtifact {
 /**
  * Document metadata through Human Review (Phase 9).
  */
+export interface ChildStatusSummary {
+  processing: number;
+  review: number;
+  approved: number;
+  failed: number;
+}
+
 export interface IDocument {
   userId: Types.ObjectId;
   originalFileName: string;
@@ -110,6 +119,14 @@ export interface IDocument {
   fileSize: number;
   uploadTimestamp: Date;
   processingStatus: DocumentProcessingStatusValue;
+  /** Parent upload record for multi-page PDF splits. */
+  parentUploadId?: Types.ObjectId;
+  /** 1-based page index for child page documents. */
+  pageNumber?: number;
+  /** Total pages in the source PDF (parent + children). */
+  totalPages?: number;
+  /** True on parent upload records that contain child page documents. */
+  isUploadContainer?: boolean;
   jobId?: string;
   failureReason?: string;
   ocr?: DocumentOcrArtifact;
@@ -178,6 +195,7 @@ const extractionArtifactSchema = new Schema<DocumentExtractionArtifact>(
     documentType: { type: String, required: true },
     vendor: { type: String, required: true },
     fields: { type: Schema.Types.Mixed, required: true, default: {} },
+    originalFields: { type: Schema.Types.Mixed, required: false },
     confidenceScore: { type: Number, required: true, default: 0 },
     provider: { type: String, required: true },
     model: { type: String, required: true },
@@ -269,6 +287,28 @@ const documentSchema = new Schema<IDocument>(
       default: DocumentProcessingStatus.UPLOADED,
       index: true,
     },
+    parentUploadId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Document',
+      required: false,
+      index: true,
+    },
+    pageNumber: {
+      type: Number,
+      required: false,
+      min: 1,
+    },
+    totalPages: {
+      type: Number,
+      required: false,
+      min: 1,
+    },
+    isUploadContainer: {
+      type: Boolean,
+      required: false,
+      default: false,
+      index: true,
+    },
     jobId: {
       type: String,
       required: false,
@@ -315,6 +355,8 @@ const documentSchema = new Schema<IDocument>(
 );
 
 documentSchema.index({ userId: 1, createdAt: -1 });
+documentSchema.index({ parentUploadId: 1, pageNumber: 1 }, { sparse: true });
+documentSchema.index({ userId: 1, isUploadContainer: 1, createdAt: -1 });
 documentSchema.index({ jobId: 1 }, { sparse: true });
 documentSchema.index({ 'vendor.name': 1, createdAt: -1 });
 documentSchema.index({ processingStatus: 1, updatedAt: -1 });
@@ -339,6 +381,12 @@ export interface PublicDocument {
   mimeType: string;
   fileSize: number;
   processingStatus: DocumentProcessingStatusValue;
+  parentUploadId?: string;
+  pageNumber?: number;
+  totalPages?: number;
+  isUploadContainer?: boolean;
+  pageDocumentCount?: number;
+  childStatusSummary?: ChildStatusSummary;
   jobId?: string;
   failureReason?: string;
   ocr?: DocumentOcrArtifact;
@@ -361,7 +409,10 @@ export interface PublicDocument {
  * Maps a Mongoose document to the public API shape.
  * Omits filesystem paths and raw LLM payloads (not needed by the UI).
  */
-export function toPublicDocument(doc: DocumentRecord): PublicDocument {
+export function toPublicDocument(
+  doc: DocumentRecord,
+  extras?: { pageDocumentCount?: number; childStatusSummary?: ChildStatusSummary },
+): PublicDocument {
   return {
     id: doc._id.toString(),
     userId: doc.userId.toString(),
@@ -371,6 +422,12 @@ export function toPublicDocument(doc: DocumentRecord): PublicDocument {
     mimeType: doc.mimeType,
     fileSize: doc.fileSize,
     processingStatus: doc.processingStatus,
+    parentUploadId: doc.parentUploadId?.toString(),
+    pageNumber: doc.pageNumber,
+    totalPages: doc.totalPages,
+    isUploadContainer: doc.isUploadContainer ?? false,
+    pageDocumentCount: extras?.pageDocumentCount,
+    childStatusSummary: extras?.childStatusSummary,
     jobId: doc.jobId,
     failureReason: doc.failureReason,
     ocr: doc.ocr

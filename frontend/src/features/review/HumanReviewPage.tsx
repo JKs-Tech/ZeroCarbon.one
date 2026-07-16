@@ -1,12 +1,16 @@
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Button,
   Paper,
   Stack,
   Typography,
 } from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { useNavigate, useParams } from 'react-router-dom';
 import { LoadingSpinner } from '../../components/LoadingSpinner';
 import { ErrorState } from '../../components/ErrorState';
@@ -65,6 +69,12 @@ export function HumanReviewPage() {
   const review = reviewQuery.data;
   const editable =
     review.document.processingStatus === DocumentProcessingStatus.WAITING_FOR_REVIEW;
+  const pageContext =
+    review.document.pageNumber != null
+      ? `Bill ${review.document.pageNumber}${
+          review.document.totalPages ? ` of ${review.document.totalPages}` : ''
+        }`
+      : null;
 
   const handleApprove = async () => {
     setApproveError(null);
@@ -92,10 +102,30 @@ export function HumanReviewPage() {
         </Alert>
       ) : (
         <Alert severity="info">
-          Edit fields as needed, then Approve. Approving saves your latest edits and stores the
-          final approved output.
+          Edit any extracted business field, then Save or Approve. Validation warnings are
+          informational only and do not block saving.
         </Alert>
       )}
+
+      {pageContext ? (
+        <Alert severity="info">
+          {pageContext} from {review.document.originalFileName.replace(/ — Page \d+$/, '')}
+          {review.document.parentUploadId ? (
+            <>
+              {' '}
+              ·{' '}
+              <Button
+                size="small"
+                variant="text"
+                onClick={() => navigate('/dashboard')}
+                sx={{ p: 0, minWidth: 0, verticalAlign: 'baseline' }}
+              >
+                Back to upload
+              </Button>
+            </>
+          ) : null}
+        </Alert>
+      ) : null}
 
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Typography variant="h6" gutterBottom>
@@ -128,6 +158,23 @@ export function HumanReviewPage() {
           </Alert>
         ) : null}
       </Paper>
+
+      {review.originalExtractionFields &&
+      Object.keys(review.originalExtractionFields).length > 0 ? (
+        <Accordion variant="outlined">
+          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <Typography variant="subtitle1">Original AI extraction (read-only)</Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Typography
+              component="pre"
+              sx={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 13, m: 0 }}
+            >
+              {JSON.stringify(review.originalExtractionFields, null, 2)}
+            </Typography>
+          </AccordionDetails>
+        </Accordion>
+      ) : null}
 
       <Stack direction="row" spacing={2}>
         <Button

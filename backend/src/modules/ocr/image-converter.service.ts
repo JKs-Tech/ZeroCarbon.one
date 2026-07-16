@@ -24,7 +24,10 @@ export class ImageConverterService {
    * Renders each PDF page to a PNG file under a unique temp directory.
    * Caller must invoke cleanup() when finished.
    */
-  public async convertPdfToImages(pdfBuffer: Buffer): Promise<{
+  public async convertPdfToImages(
+    pdfBuffer: Buffer,
+    options?: { dpi?: number },
+  ): Promise<{
     workDir: string;
     imagePaths: string[];
   }> {
@@ -32,6 +35,7 @@ export class ImageConverterService {
     await mkdir(baseTemp, { recursive: true });
 
     const workDir = await mkdtemp(path.join(baseTemp, `ocr-${createUuid()}-`));
+    const dpi = options?.dpi ?? this.config.ocr.pdfRasterDpi;
 
     try {
       const pdfPath = path.join(workDir, 'source.pdf');
@@ -40,7 +44,7 @@ export class ImageConverterService {
       const outputPrefix = path.join(workDir, 'page');
       await execFileAsync(
         'pdftoppm',
-        ['-png', '-r', String(this.config.ocr.pdfRasterDpi), pdfPath, outputPrefix],
+        ['-png', '-r', String(dpi), pdfPath, outputPrefix],
         { timeout: this.config.ocr.timeoutMs },
       );
 
@@ -57,6 +61,7 @@ export class ImageConverterService {
       this.logger.info('PDF converted to images', {
         pageCount: imagePaths.length,
         workDir,
+        dpi,
         engine: 'pdftoppm',
       });
 
@@ -65,6 +70,30 @@ export class ImageConverterService {
       await this.cleanup(workDir);
       const message = error instanceof Error ? error.message : 'unknown';
       throw new Error(`PDF image conversion failed: ${message}`);
+    }
+  }
+
+  /**
+   * Counts PDF pages via Poppler `pdfinfo` (works for scanned image PDFs).
+   */
+  public async countPdfPages(pdfBuffer: Buffer): Promise<number> {
+    const baseTemp = path.resolve(this.config.ocr.tempDirectory);
+    await mkdir(baseTemp, { recursive: true });
+    const workDir = await mkdtemp(path.join(baseTemp, `pdfinfo-${createUuid()}-`));
+
+    try {
+      const pdfPath = path.join(workDir, 'source.pdf');
+      await writeFile(pdfPath, pdfBuffer);
+      const { stdout } = await execFileAsync('pdfinfo', [pdfPath], {
+        timeout: Math.min(this.config.ocr.timeoutMs, 30_000),
+      });
+      const match = /Pages:\s*(\d+)/i.exec(stdout);
+      if (!match) {
+        throw new Error('pdfinfo did not report page count');
+      }
+      return Number.parseInt(match[1], 10);
+    } finally {
+      await this.cleanup(workDir);
     }
   }
 

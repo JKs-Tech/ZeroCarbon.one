@@ -5,6 +5,9 @@ import type { DocumentsRepository } from '../documents';
 import { DocumentProcessingStatus } from '../documents';
 import type { PublicDocument } from '../documents';
 import type { QueueService } from '../queue';
+import { AllowedUploadMime } from '../../common/constants';
+import { PdfParserService } from '../ocr/pdf-parser.service';
+import { ImageConverterService } from '../ocr/image-converter.service';
 import { FileValidator, type ValidatedUploadFile } from './validators/file.validator';
 
 /**
@@ -13,6 +16,8 @@ import { FileValidator, type ValidatedUploadFile } from './validators/file.valid
  */
 export class UploadService {
   private readonly fileValidator: FileValidator;
+  private readonly pdfParser: PdfParserService;
+  private readonly imageConverter: ImageConverterService;
 
   public constructor(
     private readonly storageService: StorageService,
@@ -22,6 +27,8 @@ export class UploadService {
     config: ConfigService,
   ) {
     this.fileValidator = new FileValidator(config.storage.maxUploadBytes);
+    this.pdfParser = new PdfParserService(logger.child('UploadPdfParser'));
+    this.imageConverter = new ImageConverterService(config, logger.child('UploadPdfPages'));
   }
 
   /**
@@ -80,11 +87,12 @@ export class UploadService {
         documentId: string;
         uploadedAt: string;
         publicDoc: PublicDocument;
+        isSplitParent?: boolean;
       }> = [];
 
       for (let index = 0; index < validatedFiles.length; index += 1) {
         const validated = validatedFiles[index];
-        const preparedDoc = await this.storeAndCreate(userId, validated);
+        const preparedDoc = await this.storeAndCreateOrSplit(userId, validated);
         prepared.push(preparedDoc);
         if (index < validatedFiles.length - 1) {
           await new Promise<void>((resolve) => setImmediate(resolve));
@@ -93,31 +101,40 @@ export class UploadService {
 
       try {
         await this.queueService.enqueueProcessDocuments(
-          prepared.map((item) => ({
-            documentId: item.documentId,
-            userId,
-            uploadedAt: item.uploadedAt,
-          })),
+          prepared
+            .filter((item) => !item.isSplitParent)
+            .map((item) => ({
+              documentId: item.documentId,
+              userId,
+              uploadedAt: item.uploadedAt,
+            })),
         );
       } catch (error) {
         await Promise.all(
-          prepared.map((item) =>
-            this.documentsRepository
-              .updateStatus(item.documentId, {
-                processingStatus: DocumentProcessingStatus.FAILED,
-                failureReason:
-                  error instanceof Error
-                    ? `Queue enqueue failed: ${error.message}`.slice(0, 2000)
-                    : 'Queue enqueue failed',
-              })
-              .catch(() => undefined),
-          ),
+          prepared
+            .filter((item) => !item.isSplitParent)
+            .map((item) =>
+              this.documentsRepository
+                .updateStatus(item.documentId, {
+                  processingStatus: DocumentProcessingStatus.FAILED,
+                  failureReason:
+                    error instanceof Error
+                      ? `Queue enqueue failed: ${error.message}`.slice(0, 2000)
+                      : 'Queue enqueue failed',
+                })
+                .catch(() => undefined),
+            ),
         );
         throw error;
       }
 
       const documents: PublicDocument[] = [];
       for (const item of prepared) {
+        if (item.isSplitParent) {
+          documents.push(item.publicDoc);
+          continue;
+        }
+
         const queued = await this.documentsRepository.updateStatus(item.documentId, {
           processingStatus: DocumentProcessingStatus.QUEUED,
           jobId: item.documentId,
@@ -157,7 +174,12 @@ export class UploadService {
   private async storeAndCreate(
     userId: string,
     validated: ValidatedUploadFile,
-  ): Promise<{ documentId: string; uploadedAt: string; publicDoc: PublicDocument }> {
+  ): Promise<{
+    documentId: string;
+    uploadedAt: string;
+    publicDoc: PublicDocument;
+    isSplitParent?: boolean;
+  }> {
     const stored = await this.storageService.store({
       buffer: validated.buffer,
       mimeType: validated.mimeType,
@@ -186,6 +208,119 @@ export class UploadService {
     }
   }
 
+  private async storeAndCreateOrSplit(
+    userId: string,
+    validated: ValidatedUploadFile,
+  ): Promise<{
+    documentId: string;
+    uploadedAt: string;
+    publicDoc: PublicDocument;
+    isSplitParent?: boolean;
+  }> {
+    if (validated.mimeType === AllowedUploadMime.PDF) {
+      const pageCount = await this.detectPdfPageCount(validated.buffer);
+      if (pageCount > 1) {
+        return this.createSplitParentAndEnqueue(userId, validated, pageCount);
+      }
+    }
+
+    return this.storeAndCreate(userId, validated);
+  }
+
+  private async detectPdfPageCount(buffer: Buffer): Promise<number> {
+    try {
+      const parsed = await this.pdfParser.extractText(buffer);
+      if (parsed.pageCount >= 1) {
+        return parsed.pageCount;
+      }
+    } catch {
+      this.logger.info('PDF direct page-count failed — using pdfinfo');
+    }
+
+    try {
+      return await this.imageConverter.countPdfPages(buffer);
+    } catch (error) {
+      this.logger.warn('PDF page-count failed — treating as single page', {
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+      // Prefer single-document hybrid OCR over incorrect multi-page split.
+      return 1;
+    }
+  }
+
+  private async createSplitParentAndEnqueue(
+    userId: string,
+    validated: ValidatedUploadFile,
+    pageCount: number,
+  ): Promise<{
+    documentId: string;
+    uploadedAt: string;
+    publicDoc: PublicDocument;
+    isSplitParent: true;
+  }> {
+    const stored = await this.storageService.store({
+      buffer: validated.buffer,
+      mimeType: validated.mimeType,
+      extension: validated.extension,
+    });
+
+    let parentId = '';
+
+    try {
+      const record = await this.documentsRepository.create({
+        userId,
+        originalFileName: validated.originalFileName,
+        storedFileName: stored.storedFileName,
+        storagePath: stored.storagePath,
+        mimeType: stored.mimeType,
+        fileSize: stored.size,
+        processingStatus: DocumentProcessingStatus.UPLOADED,
+        isUploadContainer: true,
+        totalPages: pageCount,
+      });
+
+      parentId = record._id.toString();
+      const uploadedAt = record.uploadTimestamp.toISOString();
+
+      const jobId = await this.queueService.enqueueSplitUpload(
+        {
+          parentUploadId: parentId,
+          userId,
+          uploadedAt,
+        },
+        { jobId: `split-${parentId}` },
+      );
+
+      const splitting = await this.documentsRepository.updateStatus(parentId, {
+        processingStatus: DocumentProcessingStatus.SPLITTING,
+        jobId: jobId ?? `split-${parentId}`,
+        failureReason: null,
+      });
+
+      return {
+        documentId: parentId,
+        uploadedAt,
+        publicDoc: this.documentsRepository.toPublic(splitting ?? record),
+        isSplitParent: true,
+      };
+    } catch (error) {
+      if (parentId) {
+        await this.documentsRepository
+          .updateStatus(parentId, {
+            processingStatus: DocumentProcessingStatus.FAILED,
+            failureReason:
+              error instanceof Error
+                ? `Split enqueue failed: ${error.message}`.slice(0, 2000)
+                : 'Split enqueue failed',
+          })
+          .catch(() => undefined);
+      } else {
+        await this.storageService.delete(stored.storagePath).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
   /**
    * Stores file, creates document (UPLOADED), enqueues PROCESS_DOCUMENT, marks QUEUED.
    * Never waits for worker OCR/AI — enqueue is Redis-only and returns quickly.
@@ -194,7 +329,12 @@ export class UploadService {
     userId: string,
     validated: ValidatedUploadFile,
   ): Promise<PublicDocument> {
-    const prepared = await this.storeAndCreate(userId, validated);
+    const prepared = await this.storeAndCreateOrSplit(userId, validated);
+
+    if (prepared.isSplitParent) {
+      return prepared.publicDoc;
+    }
+
     const { documentId, uploadedAt } = prepared;
 
     try {

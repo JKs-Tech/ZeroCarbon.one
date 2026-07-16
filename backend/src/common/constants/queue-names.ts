@@ -14,6 +14,7 @@ export type QueueNameValue = (typeof QueueName)[keyof typeof QueueName];
  */
 export const JobName = {
   PROCESS_DOCUMENT: 'PROCESS_DOCUMENT',
+  SPLIT_UPLOAD: 'SPLIT_UPLOAD',
 } as const;
 
 export type JobNameValue = (typeof JobName)[keyof typeof JobName];

@@ -33,6 +33,22 @@ export class DocumentsController {
   }
 
   /**
+   * GET /api/v1/documents/:id/pages
+   */
+  public async listPages(req: Request, res: Response): Promise<void> {
+    const appReq = req as AppRequest;
+    const documents = await this.documentsService.listPageDocuments(
+      req.params.id,
+      appReq.user!,
+    );
+
+    ApiResponse.success(res, { documents }, {
+      message: 'Page documents retrieved',
+      requestId: appReq.requestId,
+    });
+  }
+
+  /**
    * GET /api/v1/documents/:id
    */
   public async getById(req: Request, res: Response): Promise<void> {

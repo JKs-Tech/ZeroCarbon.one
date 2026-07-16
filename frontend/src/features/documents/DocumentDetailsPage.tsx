@@ -146,6 +146,17 @@ export function DocumentDetailsPage() {
         <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 13 }}>
           {JSON.stringify(document.extraction?.fields ?? {}, null, 2)}
         </Typography>
+        {document.extraction?.originalFields ? (
+          <>
+            <Divider sx={{ my: 1 }} />
+            <Typography variant="subtitle2" gutterBottom>
+              Original AI extraction (preserved)
+            </Typography>
+            <Typography component="pre" sx={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: 13 }}>
+              {JSON.stringify(document.extraction.originalFields, null, 2)}
+            </Typography>
+          </>
+        ) : null}
       </Paper>
 
       {document.approval?.approved && document.approvedFields ? (

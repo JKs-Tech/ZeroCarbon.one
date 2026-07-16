@@ -26,6 +26,15 @@ export function createDocumentsRouter(
   );
 
   router.get(
+    '/:id/pages',
+    authenticate,
+    authorize(Role.ADMIN, Role.USER),
+    asyncHandler(async (req, res) => {
+      await controller.listPages(req, res);
+    }),
+  );
+
+  router.get(
     '/:id',
     authenticate,
     authorize(Role.ADMIN, Role.USER),

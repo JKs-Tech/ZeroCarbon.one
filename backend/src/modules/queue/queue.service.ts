@@ -4,20 +4,22 @@ import type { LoggerService } from '../logger';
 import { JobName, QueueName } from './queue.constants';
 import { buildRedisConnection } from './redis-connection';
 import type {
+  DocumentProcessingJobPayload,
   EnqueueOptions,
   EnqueueProcessDocumentOptions,
   ProcessDocumentJobPayload,
   QueueHealthSnapshot,
+  SplitUploadJobPayload,
 } from './queue.types';
 
 /**
  * Responsibility: Application-facing queue API.
  * Business modules must never construct BullMQ clients directly — use this service.
  *
- * Phase 5: one queue (DocumentProcessingQueue), one job (PROCESS_DOCUMENT).
+ * One queue (DocumentProcessingQueue), job types: PROCESS_DOCUMENT, SPLIT_UPLOAD.
  */
 export class QueueService {
-  private queue: Queue<ProcessDocumentJobPayload> | undefined;
+  private queue: Queue<DocumentProcessingJobPayload> | undefined;
   private initialized = false;
   private registeredWorkerCount = 0;
 
@@ -47,12 +49,12 @@ export class QueueService {
   /**
    * Returns (and lazily creates) the single document-processing queue.
    */
-  public getQueue(): Queue<ProcessDocumentJobPayload> {
+  public getQueue(): Queue<DocumentProcessingJobPayload> {
     if (this.queue) {
       return this.queue;
     }
 
-    this.queue = new Queue<ProcessDocumentJobPayload>(QueueName.DOCUMENT_PROCESSING, {
+    this.queue = new Queue<DocumentProcessingJobPayload>(QueueName.DOCUMENT_PROCESSING, {
       connection: buildRedisConnection(this.config),
       prefix: this.config.queue.prefix,
       defaultJobOptions: this.defaultJobOptions(),
@@ -105,6 +107,18 @@ export class QueueService {
   }
 
   /**
+   * Enqueues SPLIT_UPLOAD for a multi-page PDF parent upload.
+   */
+  public async enqueueSplitUpload(
+    payload: SplitUploadJobPayload,
+    options: EnqueueProcessDocumentOptions = {},
+  ): Promise<string | undefined> {
+    return this.enqueue(JobName.SPLIT_UPLOAD, payload, {
+      jobId: options.jobId ?? `split-${payload.parentUploadId}`,
+    });
+  }
+
+  /**
    * Removes an existing BullMQ job (any state) so it can be re-enqueued with the same id.
    */
   public async removeJob(jobId: string): Promise<boolean> {
@@ -125,8 +139,8 @@ export class QueueService {
    * Low-level enqueue for the document-processing queue.
    */
   public async enqueue(
-    jobName: typeof JobName.PROCESS_DOCUMENT,
-    data: ProcessDocumentJobPayload,
+    jobName: typeof JobName.PROCESS_DOCUMENT | typeof JobName.SPLIT_UPLOAD,
+    data: DocumentProcessingJobPayload,
     options: EnqueueOptions = {},
   ): Promise<string | undefined> {
     const queue = this.getQueue();
@@ -142,7 +156,8 @@ export class QueueService {
       queue: QueueName.DOCUMENT_PROCESSING,
       jobName,
       jobId: job.id,
-      documentId: data.documentId,
+      documentId: 'documentId' in data ? data.documentId : undefined,
+      parentUploadId: 'parentUploadId' in data ? data.parentUploadId : undefined,
       userId: data.userId,
     });
 

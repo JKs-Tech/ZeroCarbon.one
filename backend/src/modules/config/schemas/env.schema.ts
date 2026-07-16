@@ -76,7 +76,12 @@ export const envSchema = z.object({
   OCR_PDF_TEXT_MIN_CHARS: z.coerce.number().int().nonnegative().optional(),
   OCR_QUALITY_THRESHOLD: z.coerce.number().min(0).max(1).default(0.55),
   TEMP_DIRECTORY: z.string().min(1).default('./tmp/ocr'),
-  OCR_PDF_RASTER_DPI: z.coerce.number().int().positive().default(150),
+  /** Default 200 DPI — clearer OCR for scanned utility bills than 150. */
+  OCR_PDF_RASTER_DPI: z.coerce.number().int().positive().default(200),
+  /** Re-rasterize / re-OCR when Tesseract avg confidence is below this (0–100). */
+  OCR_CONFIDENCE_RETRY_THRESHOLD: z.coerce.number().min(0).max(100).default(55),
+  /** DPI used for the confidence retry pass. */
+  OCR_RETRY_RASTER_DPI: z.coerce.number().int().positive().default(300),
 
   // --- AI (Phase 7) ---
   AI_PROVIDER: z
@@ -99,16 +104,24 @@ export const envSchema = z.object({
   /**
    * GPT-5 Responses API reasoning effort.
    * @see https://platform.openai.com/docs/guides/reasoning
-   * minimal = fastest / cheapest for classification & extraction.
+   * low = better recall on dense/noisy OCR without full reasoning cost.
    */
   OPENAI_REASONING_EFFORT: z
     .enum(['minimal', 'low', 'medium', 'high'])
-    .default('minimal'),
+    .default('low'),
   /**
    * Responses API max_output_tokens. GPT-5 reasoning tokens count against this budget —
-   * keep high enough for reasoning + JSON (2048 is often too low for gpt-5-nano).
+   * keep high enough for reasoning + full field JSON on large bills.
    */
-  MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(2048),
+  MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8192),
+  /**
+   * When true, pass page images to OpenAI for extraction on scanned/image bills
+   * (or when OCR confidence is low) so amounts and labels are recovered from pixels.
+   */
+  AI_VISION_ENABLED: z
+    .enum(['true', 'false', '1', '0'])
+    .default('true')
+    .transform((value) => value === 'true' || value === '1'),
 
   // --- Validation (Phase 8) ---
   MAX_ALLOWED_AMOUNT: z.coerce.number().positive().default(10_000_000),

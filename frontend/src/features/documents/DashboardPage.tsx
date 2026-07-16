@@ -12,12 +12,13 @@ import {
   Typography,
 } from '@mui/material';
 import { DocumentCard } from '../../components/DocumentCard';
+import { UploadGroupCard, isUploadGroup } from '../../components/UploadGroupCard';
 import { EmptyState } from '../../components/EmptyState';
 import { ErrorState } from '../../components/ErrorState';
 import { FileUpload } from '../../components/FileUpload';
 import { LoadingSpinner } from '../../components/LoadingSpinner';
 import { PaginationControls } from '../../components/PaginationControls';
-import { PAGE_SIZE, QUERY_KEYS } from '../../constants';
+import { PAGE_SIZE, QUERY_KEYS, DocumentProcessingStatus } from '../../constants';
 import {
   documentsApi,
   type BulkUploadProgress,
@@ -43,7 +44,18 @@ export function DashboardPage() {
       const docs = q.state.data?.documents ?? [];
       const hasActive =
         (q.state.data?.counts.processing ?? 0) > 0 ||
-        docs.some((doc) => isProcessingStatus(doc.processingStatus));
+        docs.some((doc) => {
+          if (isProcessingStatus(doc.processingStatus)) {
+            return true;
+          }
+          if (doc.isUploadContainer) {
+            return (
+              doc.processingStatus === DocumentProcessingStatus.SPLITTING ||
+              (doc.childStatusSummary?.processing ?? 0) > 0
+            );
+          }
+          return false;
+        });
       return hasActive ? 2000 : false;
     },
   });
@@ -248,7 +260,11 @@ export function DashboardPage() {
           <Grid2 container spacing={2}>
             {documents.map((document) => (
               <Grid2 key={document.id} size={{ xs: 12, md: 6, lg: 4 }}>
-                <DocumentCard document={document} />
+                {isUploadGroup(document) ? (
+                  <UploadGroupCard document={document} />
+                ) : (
+                  <DocumentCard document={document} />
+                )}
               </Grid2>
             ))}
           </Grid2>

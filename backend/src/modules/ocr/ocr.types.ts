@@ -22,6 +22,14 @@ export interface OcrExtractResult {
   pageCount: number;
   qualityScore?: number;
   fallbackTriggered: boolean;
+  /**
+   * First-page PNG for multimodal AI when OCR came from rasterized / image input.
+   * Not persisted — passed in-memory to the AI step only.
+   */
+  pageImage?: {
+    mimeType: 'image/png' | 'image/jpeg';
+    buffer: Buffer;
+  };
 }
 
 /**

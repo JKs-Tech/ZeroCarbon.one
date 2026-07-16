@@ -65,7 +65,9 @@ export function DocumentCard({ document }: DocumentCardProps) {
                 lineHeight: 1.35,
               }}
             >
-              {document.originalFileName}
+              {document.pageNumber != null
+                ? `Bill ${document.pageNumber}${document.totalPages ? ` of ${document.totalPages}` : ''}`
+                : document.originalFileName}
             </Typography>
             <StatusBadge status={document.processingStatus} />
           </Stack>

@@ -52,6 +52,8 @@ export interface AppConfig {
     qualityThreshold: number;
     tempDirectory: string;
     pdfRasterDpi: number;
+    confidenceRetryThreshold: number;
+    retryRasterDpi: number;
   };
   ai: {
     provider: EnvVars['AI_PROVIDER'];
@@ -61,6 +63,7 @@ export interface AppConfig {
     reasoningEffort: 'minimal' | 'low' | 'medium' | 'high';
     maxOutputTokens: number;
     maxRetries: number;
+    visionEnabled: boolean;
     openai: {
       apiKey: string;
       model: string;
@@ -262,6 +265,8 @@ export class ConfigService {
         qualityThreshold: env.OCR_QUALITY_THRESHOLD,
         tempDirectory: env.TEMP_DIRECTORY,
         pdfRasterDpi: env.OCR_PDF_RASTER_DPI,
+        confidenceRetryThreshold: env.OCR_CONFIDENCE_RETRY_THRESHOLD,
+        retryRasterDpi: env.OCR_RETRY_RASTER_DPI,
       },
       ai: {
         provider: env.AI_PROVIDER,
@@ -269,6 +274,7 @@ export class ConfigService {
         reasoningEffort: env.OPENAI_REASONING_EFFORT,
         maxOutputTokens: env.MAX_OUTPUT_TOKENS,
         maxRetries: env.MAX_AI_RETRIES ?? env.AI_MAX_RETRIES ?? 2,
+        visionEnabled: env.AI_VISION_ENABLED,
         openai: {
           apiKey: env.OPENAI_API_KEY,
           model: env.OPENAI_MODEL,

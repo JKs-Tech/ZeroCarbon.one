@@ -29,9 +29,12 @@ Register/login are rate-limited (`AUTH_RATE_LIMIT_*`).
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/v1/documents` | Bearer (`ADMIN` / `USER`) | Paginated list. `USER` sees own docs; `ADMIN` sees all. |
+| `GET` | `/api/v1/documents` | Bearer (`ADMIN` / `USER`) | Paginated list (top-level only: standalone docs + parent uploads). `USER` sees own docs; `ADMIN` sees all. |
 | `GET` | `/api/v1/documents/:id` | Bearer | Document detail (owner or admin). |
+| `GET` | `/api/v1/documents/:id/pages` | Bearer | Child page documents for a multi-page PDF parent upload, ordered by `pageNumber`. |
 | `POST` | `/api/v1/documents/:id/reprocess` | Bearer | Requeue a `FAILED` document for processing. |
+
+Parent upload documents (multi-page PDFs) include `pageDocumentCount` and `childStatusSummary` aggregates. Child page documents include `parentUploadId`, `pageNumber`, and `totalPages`.
 
 ### List query parameters
 
@@ -54,7 +57,10 @@ Multipart form uploads. Allowed MIME types: `application/pdf`, `image/png`, `ima
 | `POST` | `/api/v1/documents/upload` | Bearer | Single file. Form field: `file`. |
 | `POST` | `/api/v1/documents/uploads` | Bearer | Multiple files. Form field: `files` (up to `MAX_FILES_PER_UPLOAD`). |
 
-Creates document metadata, stores the file, sets status to `QUEUED`, and enqueues a BullMQ `PROCESS_DOCUMENT` job.
+Creates document metadata, stores the file, and enqueues background processing.
+
+- **Single-page PDF or image:** status → `QUEUED`, job `PROCESS_DOCUMENT`.
+- **Multi-page PDF:** creates a parent upload container, enqueues `SPLIT_UPLOAD`, status → `SPLITTING`. The worker splits each page into an independent child document (PNG), then enqueues one `PROCESS_DOCUMENT` job per page. Children run OCR → AI → validation → `WAITING_FOR_REVIEW` independently.
 
 ---
 
@@ -62,9 +68,9 @@ Creates document metadata, stores the file, sets status to `QUEUED`, and enqueue
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/v1/documents/:id/review` | Bearer | Review payload (fields, validation warnings, status). |
-| `PUT` | `/api/v1/documents/:id/review` | Bearer | Update extracted fields. Body: `{ fields: Record<string, string \| number \| null> }` (at least one key). |
-| `POST` | `/api/v1/documents/:id/approve` | Bearer | Approve while `WAITING_FOR_REVIEW`. Freezes `approvedFields` and sets `APPROVED`. |
+| `GET` | `/api/v1/documents/:id/review` | Bearer | Review payload (fields, validation warnings, status, `originalExtractionFields`). |
+| `PUT` | `/api/v1/documents/:id/review` | Bearer | Update extracted business fields while `WAITING_FOR_REVIEW`. Body: `{ fields: Record<string, string \| number \| null> }`. Persists corrections and audit logs; status stays `WAITING_FOR_REVIEW`. |
+| `POST` | `/api/v1/documents/:id/approve` | Bearer | Approve while `WAITING_FOR_REVIEW`. Freezes `approvedFields` from current `extraction.fields`. Original AI values remain in `extraction.originalFields`. Sets `APPROVED`. |
 
 There is no reject endpoint. Approval is one-way.
 

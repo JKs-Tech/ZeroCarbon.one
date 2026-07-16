@@ -38,6 +38,13 @@ export interface AuthResult {
   expiresIn: string;
 }
 
+export interface ChildStatusSummary {
+  processing: number;
+  review: number;
+  approved: number;
+  failed: number;
+}
+
 export interface DocumentSummary {
   id: string;
   userId: string;
@@ -47,6 +54,12 @@ export interface DocumentSummary {
   mimeType: string;
   fileSize: number;
   processingStatus: DocumentProcessingStatusValue | string;
+  parentUploadId?: string;
+  pageNumber?: number;
+  totalPages?: number;
+  isUploadContainer?: boolean;
+  pageDocumentCount?: number;
+  childStatusSummary?: ChildStatusSummary;
   jobId?: string;
   failureReason?: string;
   ocr?: unknown;
@@ -67,6 +80,7 @@ export interface DocumentSummary {
     documentType: string;
     vendor: string;
     fields: Record<string, string | number | null>;
+    originalFields?: Record<string, string | number | null>;
     confidenceScore?: number;
     provider: string;
     model: string;
@@ -107,6 +121,9 @@ export interface ReviewPayload {
     mimeType: string;
     fileSize: number;
     processingStatus: string;
+    parentUploadId?: string;
+    pageNumber?: number;
+    totalPages?: number;
     uploadTimestamp: string;
     createdAt: string;
     updatedAt: string;
@@ -126,6 +143,7 @@ export interface ReviewPayload {
   vendor?: DocumentSummary['vendor'];
   validation?: DocumentSummary['validation'];
   editableFields: Record<string, string | number | null>;
+  originalExtractionFields?: Record<string, string | number | null>;
   approvalStatus: 'WAITING_FOR_REVIEW' | 'APPROVED' | 'NOT_READY';
   approval?: DocumentSummary['approval'];
   approvedFields?: Record<string, string | number | null>;

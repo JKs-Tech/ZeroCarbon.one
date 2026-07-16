@@ -24,6 +24,7 @@ export abstract class StubAiProvider implements AiProvider {
     _ocrText: string,
     _documentType: DocumentCategoryValue,
     _vendor: string,
+    _image?: import('./ai-provider.interface').AiExtractionImage,
   ): Promise<ExtractionResult> {
     return Promise.reject(this.notImplemented());
   }
